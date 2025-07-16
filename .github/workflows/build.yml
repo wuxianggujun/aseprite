@@ -13,121 +13,101 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      #######################################################################
-      # 1️⃣  Checkout (with submodules)
-      #######################################################################
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+    #######################################################################
+    # 1️⃣  Checkout (含子模块)
+    #######################################################################
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      #######################################################################
-      # 2️⃣  Toolchain helpers – Ninja + MSVC env
-      #######################################################################
-      - uses: aseprite/get-ninja@main
-      - uses: ilammy/msvc-dev-cmd@v1
+    #######################################################################
+    # 2️⃣  工具链：Ninja + MSVC 环境
+    #######################################################################
+    - uses: aseprite/get-ninja@main
+    - uses: ilammy/msvc-dev-cmd@v1
 
-      #######################################################################
-      # 3️⃣  Download Skia that matches the current commit
-      #######################################################################
-      - name: Download Skia
-        shell: bash
-        run: |
-          this_dir=$(cygpath "${{ github.workspace }}")
-          skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
-          skia_file=$(basename "$skia_url")
-          echo "Skia URL → $skia_url"
-          curl -L -o "$skia_file" "$skia_url"
-          unzip -q "$skia_file" -d skia
+    #######################################################################
+    # 3️⃣  下载匹配版本的 Skia
+    #######################################################################
+    - name: Download Skia
+      shell: bash
+      run: |
+        this_dir=$(cygpath "${{ github.workspace }}")
+        skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+        skia_file=$(basename "$skia_url")
+        echo "Skia URL → $skia_url"
+        curl -L -o "$skia_file" "$skia_url"
+        unzip -q "$skia_file" -d skia
 
-      #######################################################################
-      # 4️⃣  Install **OpenSSL 1.1**  ── Chocolatey (auto-detect version)
-      #     ➜ fallback to silent Win64OpenSSL_Light-1.1.1w.exe installer
-      #######################################################################
-      - name: Install OpenSSL 1.1 runtime
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+    #######################################################################
+    # 4️⃣  安装 **OpenSSL 1.1**（仅官方安装包，彻底摆脱 Chocolatey）
+    #######################################################################
+    - name: Install OpenSSL 1.1 runtime
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
 
-          ##############################################################
-          # (A) Try the newest 1.1.1-xxxx available in Chocolatey
-          ##############################################################
-          $vers = choco list openssl.light --exact --all-versions |
-                  Select-String -Pattern '1\.1\.1\.[0-9]+' |
-                  ForEach-Object { $_.Matches.Value } | Sort-Object -Descending
+        # 下载官方 Win64 安装包（1.1.1w；若官网后续更新补丁，只需改文件名）
+        $url = 'https://slproweb.com/download/Win64OpenSSL_Light-1_1_1w.exe'
+        Write-Host "⬇️  Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile openssl.exe
 
-          $installed = $false
-          foreach ($v in $vers) {
-            Write-Host "➜  Trying Chocolatey openssl.light $v …"
-            choco install openssl.light --version $v --params "\"/InstallDir:C:\openssl\"" -y --no-progress
-            if ($LASTEXITCODE -eq 0) { $installed = $true; break }
-          }
+        # 静默安装到 C:\openssl
+        Write-Host "⚙️  Installing OpenSSL 1.1 to C:\\openssl ..."
+        Start-Process -FilePath .\openssl.exe `
+          -ArgumentList '/verysilent','/sp-','/suppressmsgboxes','/norestart','/dir="C:\openssl"' `
+          -NoNewWindow -Wait
 
-          ##############################################################
-          # (B) Fallback: download & silent-install Inno Setup package
-          ##############################################################
-          if (-not (Test-Path 'C:\openssl\bin\libcrypto-1_1-x64.dll')) {
-            Write-Host '⚠️  Chocolatey failed – using Win64OpenSSL_Light-1.1.1w.exe …'
-            iwr -Uri 'https://slproweb.com/download/Win64OpenSSL_Light-1_1_1w.exe' -OutFile openssl.exe
-            Start-Process -FilePath .\openssl.exe -ArgumentList '/verysilent','/sp-','/suppressmsgboxes','/norestart','/dir="C:\openssl"' -NoNewWindow -Wait
-          }
+        # 确认 DLL 是否存在
+        if (-not (Test-Path 'C:\openssl\bin\libcrypto-1_1-x64.dll')) {
+          throw '❌ OpenSSL DLLs not found after install.'
+        }
+        Write-Host '✅  OpenSSL 1.1 installed.'
 
-      #######################################################################
-      # 5️⃣  Configure CMake (Release + Skia + Lua scripting)
-      #######################################################################
-      - name: Configure CMake
-        shell: bash
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLAF_BACKEND=skia \
-            -DSKIA_DIR=$(realpath skia) \
-            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64) \
-            -DENABLE_SCRIPTING=ON \
-            -DENABLE_CCACHE=OFF
+    #######################################################################
+    # 5️⃣  CMake 配置（Release + Skia + Lua）
+    #######################################################################
+    - name: Configure CMake
+      shell: bash
+      run: |
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLAF_BACKEND=skia \
+          -DSKIA_DIR=$(realpath skia) \
+          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64) \
+          -DENABLE_SCRIPTING=ON \
+          -DENABLE_CCACHE=OFF
 
-      #######################################################################
-      # 6️⃣  Build
-      #######################################################################
-      - name: Build
-        shell: bash
-        run: cmake --build build --config Release
+    #######################################################################
+    # 6️⃣  编译
+    #######################################################################
+    - name: Build
+      shell: bash
+      run: cmake --build build --config Release
 
-      #######################################################################
-      # 7️⃣  Bundle OpenSSL DLLs next to the exe (search multiple roots)
-      #######################################################################
-      - name: Bundle OpenSSL DLLs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $outDir = "${{ github.workspace }}\build\bin"
+    #######################################################################
+    # 7️⃣  复制 OpenSSL DLLs 到 exe 同目录
+    #######################################################################
+    - name: Bundle OpenSSL DLLs
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $outDir = "${{ github.workspace }}\build\bin"
+        $srcDir = 'C:\openssl\bin'
 
-          $roots = @('C:\openssl\bin', 'C:\Program Files\OpenSSL-Win64\bin', 'C:\Program Files\OpenSSL-Win32\bin')
-          $found = $false
-          foreach ($r in $roots) {
-            if (Test-Path $r) {
-              $crypto = Get-ChildItem -Path $r -Filter 'libcrypto*-1_1*-x64.dll' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              $ssl    = Get-ChildItem -Path $r -Filter 'libssl*-1_1*-x64.dll'    -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($crypto -and $ssl) {
-                Write-Host "✅  Found OpenSSL DLLs in $r → copying to $outDir"
-                Copy-Item $crypto.FullName -Destination $outDir -Force
-                Copy-Item $ssl.FullName    -Destination $outDir -Force
-                $found = $true
-                break
-              }
-            }
-          }
+        Copy-Item "$srcDir\libcrypto*-1_1*-x64.dll" -Destination $outDir -Force
+        Copy-Item "$srcDir\libssl*-1_1*-x64.dll"    -Destination $outDir -Force
+        Write-Host "✅  Copied OpenSSL DLLs to $outDir"
 
-          if (-not $found) { throw '❌ OpenSSL 1.1 DLLs not found – aborting.' }
-
-      #######################################################################
-      # 8️⃣  Upload artifact (exe + DLLs + data folder)
-      #######################################################################
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: aseprite-windows-release
-          path: |
-            build/bin/aseprite.exe
-            build/bin/libcrypto*-1_1*-x64.dll
-            build/bin/libssl*-1_1*-x64.dll
-            build/bin/data/**
+    #######################################################################
+    # 8️⃣  上传产物
+    #######################################################################
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-windows-release
+        path: |
+          build/bin/aseprite.exe
+          build/bin/libcrypto*-1_1*-x64.dll
+          build/bin/libssl*-1_1*-x64.dll
+          build/bin/data/**
