@@ -1,75 +1,90 @@
-# GitHub Actions Workflow – Windows‑only Release build
-# Save as .github/workflows/build.yml (or replace your existing one)
+# GitHub Actions Workflow — Windows Release build (Skia via `laf/misc/skia-url.sh`, OpenSSL DLL fixed)
+# Place this file at .github/workflows/build.yml
 
 name: build
 
+# Runs on every push to main and on PRs
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
 
 jobs:
   build:
-    # 👉 只在最新版 Windows runner 上执行
     runs-on: windows-latest
 
     strategy:
       fail-fast: false
       matrix:
-        build_type: [Release]   # 只编 Release
-        ui: [gui]              # 如需 CLI 请改为 [gui, cli]
-        scripting: [lua]       # 按需改为 [lua, noscripts]
+        build_type: [Release]   # ⚙️ Single variant → one .exe
+        ui: [gui]               # need only GUI; add "cli" if required
+        scripting: [lua]        # turn off by setting to [noscripts]
 
     steps:
-    # 1️⃣ 拉源码（含子模块）
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      # 1️⃣ Checkout source & submodules
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    # 2️⃣ Ninja 构建工具
-    - uses: aseprite/get-ninja@main
+      # 2️⃣ Toolchain helpers ( Ninja + MSVC env )
+      - uses: aseprite/get-ninja@main
+      - uses: ilammy/msvc-dev-cmd@v1
 
-    # 3️⃣ MSVC 环境初始化
-    - uses: ilammy/msvc-dev-cmd@v1
+      # 3️⃣ Download & unpack Skia using upstream script (same as original workflow)
+      - name: Install Skia
+        if: matrix.ui == 'gui'
+        shell: bash
+        run: |
+          this_dir=$(cygpath "${{ github.workspace }}")
+          skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+          skia_file=$(basename "$skia_url")
+          echo "Skia URL → $skia_url"
+          curl -L -o "$skia_file" "$skia_url"
+          unzip -q "$skia_file" -d skia
 
-    # 4️⃣ 下载 / 解压 Skia（二进制包由 aseprite 项目脚本提供）
-    - name: Install Skia
-      if: ${{ matrix.ui == 'gui' }}
-      shell: bash
-      run: |
-        this_dir=$(cygpath "${{ github.workspace }}")
-        skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
-        skia_file=$(basename "$skia_url")
-        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
-        unzip "$skia_file" -d skia
+      # 4️⃣ Provide missing OpenSSL runtime (libcrypto‑1_1‑x64.dll)  ──► prevents startup error
+      - name: Fetch OpenSSL runtime DLL
+        shell: pwsh
+        run: |
+          $url  = "https://github.com/aseprite/aseprite-mingw/releases/download/openssl-1.1.1t/openssl-1.1.1t-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile openssl.zip
+          7z x openssl.zip -oopenssl | Out-Null
+          Copy-Item openssl/bin/libcrypto-1_1-x64.dll .
 
-    # 5️⃣ 生成构建文件
-    - name: Generate Build Files
-      shell: bash
-      run: |
-        export enable_ccache=off            # Windows 没有 ccache
-        export laf_backend=skia             # 只做 GUI 构建
-        export enable_scripting=on          # 启用 Lua
-        export skia_arch=x64
+      # 5️⃣ CMake configure
+      - name: Generate build files
+        shell: bash
+        env:
+          enable_ccache: off           # ccache not used on Windows
+          laf_backend: skia
+          enable_scripting: on
+          skia_arch: x64
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DENABLE_SCRIPTING=$enable_scripting \
+            -DENABLE_CCACHE=$enable_ccache \
+            -DLAF_BACKEND=$laf_backend \
+            -DSKIA_DIR=$(realpath skia) \
+            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
 
-        cmake -S . -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DENABLE_TESTS=ON \
-          -DENABLE_SCRIPTING=$enable_scripting \
-          -DENABLE_CCACHE=$enable_ccache \
-          -DLAF_BACKEND=$laf_backend \
-          -DSKIA_DIR=$(realpath skia) \
-          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+      # 6️⃣ Compile (one .exe)
+      - name: Build
+        shell: bash
+        run: cmake --build build --config ${{ matrix.build_type }}
 
-    # 6️⃣ 编译
-    - name: Build
-      shell: bash
-      run: |
-        cd build && ninja
+      # 7️⃣ Copy DLL next to exe (so it works out‑of‑the‑box)
+      - name: Copy DLL into output folder
+        shell: pwsh
+        run: |
+          Copy-Item "${{ github.workspace }}\libcrypto-1_1-x64.dll" -Destination "${{ github.workspace }}\build\bin" -Force
 
-    # 7️⃣ 上传可执行文件作为构件
-    - name: Upload exe artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: aseprite-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
-        path: build/bin/*.exe
+      # 8️⃣ Upload ready‑to‑run artifact (exe + DLL + data folder)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-windows-release
+          path: |
+            build/bin/aseprite.exe
+            build/bin/libcrypto-1_1-x64.dll
+            build/bin/data/**
