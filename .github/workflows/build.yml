@@ -1,9 +1,8 @@
-# GitHub Actions Workflow — Windows Release build (Skia via `laf/misc/skia-url.sh`, OpenSSL DLL fixed)
-# Place this file at .github/workflows/build.yml
+# GitHub Actions Workflow — Windows‑only **Release** build for Aseprite (GUI + Lua)
+# Copy this to .github/workflows/build.yml
 
 name: build
 
-# Runs on every push to main and on PRs
 on:
   push:
     branches: [main]
@@ -13,73 +12,61 @@ jobs:
   build:
     runs-on: windows-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [Release]   # ⚙️ Single variant → one .exe
-        ui: [gui]               # need only GUI; add "cli" if required
-        scripting: [lua]        # turn off by setting to [noscripts]
-
     steps:
-      # 1️⃣ Checkout source & submodules
+      # 1️⃣ Checkout (with submodules)
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2️⃣ Toolchain helpers ( Ninja + MSVC env )
-      - uses: aseprite/get-ninja@main
-      - uses: ilammy/msvc-dev-cmd@v1
+      # 2️⃣ Toolchain helpers
+      - uses: aseprite/get-ninja@main      # Ninja
+      - uses: ilammy/msvc-dev-cmd@v1       # MSVC env
 
-      # 3️⃣ Download & unpack Skia using upstream script (same as original workflow)
-      - name: Install Skia
-        if: matrix.ui == 'gui'
+      # 3️⃣ Download the Skia binary that matches the current commit
+      - name: Download Skia
         shell: bash
         run: |
           this_dir=$(cygpath "${{ github.workspace }}")
           skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
           skia_file=$(basename "$skia_url")
-          echo "Skia URL → $skia_url"
+          echo "Skia URL → $skia_url"
           curl -L -o "$skia_file" "$skia_url"
           unzip -q "$skia_file" -d skia
 
-      # 4️⃣ Provide missing OpenSSL runtime (libcrypto‑1_1‑x64.dll)  ──► prevents startup error
-      - name: Fetch OpenSSL runtime DLL
+      # 4️⃣ Install OpenSSL 1.1 runtime to a **fixed path** so we can always find the DLLs
+      #    The *light* package has no weird extras and still ships 1.1.1‑series DLLs that Aseprite expects
+      - name: Install OpenSSL 1.1 runtime
         shell: pwsh
         run: |
-          $url  = "https://github.com/aseprite/aseprite-mingw/releases/download/openssl-1.1.1t/openssl-1.1.1t-win64.zip"
-          Invoke-WebRequest -Uri $url -OutFile openssl.zip
-          7z x openssl.zip -oopenssl | Out-Null
-          Copy-Item openssl/bin/libcrypto-1_1-x64.dll .
+          choco install openssl.light --version 1.1.1.2100 --params "/InstallDir:C:\openssl" --no-progress -y
 
-      # 5️⃣ CMake configure
-      - name: Generate build files
+      # 5️⃣ Configure CMake (Release + Skia + Lua scripting)
+      - name: Configure CMake
         shell: bash
-        env:
-          enable_ccache: off           # ccache not used on Windows
-          laf_backend: skia
-          enable_scripting: on
-          skia_arch: x64
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DENABLE_SCRIPTING=$enable_scripting \
-            -DENABLE_CCACHE=$enable_ccache \
-            -DLAF_BACKEND=$laf_backend \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLAF_BACKEND=skia \
             -DSKIA_DIR=$(realpath skia) \
-            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64) \
+            -DENABLE_SCRIPTING=ON \
+            -DENABLE_CCACHE=OFF
 
-      # 6️⃣ Compile (one .exe)
+      # 6️⃣ Build
       - name: Build
         shell: bash
-        run: cmake --build build --config ${{ matrix.build_type }}
+        run: cmake --build build --config Release
 
-      # 7️⃣ Copy DLL next to exe (so it works out‑of‑the‑box)
-      - name: Copy DLL into output folder
+      # 7️⃣ Bundle the two OpenSSL 1.1 DLLs next to the exe
+      - name: Bundle OpenSSL DLLs
         shell: pwsh
         run: |
-          Copy-Item "${{ github.workspace }}\libcrypto-1_1-x64.dll" -Destination "${{ github.workspace }}\build\bin" -Force
+          $dllRoot = 'C:\openssl\bin'
+          $outDir  = "${{ github.workspace }}\build\bin"
+          Copy-Item "$dllRoot\libcrypto-1_1-x64.dll" -Destination $outDir -Force
+          Copy-Item "$dllRoot\libssl-1_1-x64.dll"    -Destination $outDir -Force
 
-      # 8️⃣ Upload ready‑to‑run artifact (exe + DLL + data folder)
+      # 8️⃣ Upload artifact (exe + DLLs + data folder)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -87,4 +74,5 @@ jobs:
           path: |
             build/bin/aseprite.exe
             build/bin/libcrypto-1_1-x64.dll
+            build/bin/libssl-1_1-x64.dll
             build/bin/data/**
