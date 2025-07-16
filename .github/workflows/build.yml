@@ -1,5 +1,5 @@
 # GitHub Actions Workflow — Windows‑only **Release** build for Aseprite (GUI + Lua)
-# Save as .github/workflows/build.yml
+# Place in .github/workflows/build.yml
 
 name: build
 
@@ -40,16 +40,40 @@ jobs:
           unzip -q "$skia_file" -d skia
 
       #######################################################################
-      # 4️⃣  Install **OpenSSL 1.1** runtime (DLLs) in a predictable path
-      #     ▸ Chocolatey still hosts 1.1.1‑u (build 1.1.1.2100). If this build
-      #       ever disappears, bump the version to the latest available
-      #       **1.1.1‑YYYY** you can find on the package page.
+      # 4️⃣  Install **OpenSSL 1.1** (robust version detection + fallback)
       #######################################################################
-      - name: Install OpenSSL 1.1 runtime
+      - name: Install / fetch OpenSSL 1.1 DLLs
+        id: openssl
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          choco install openssl.light --version 1.1.1.2100 --params "\"/InstallDir:C:\openssl\"" --no-progress -y
+
+          ##################################################################
+          # (A) Find latest 1.1.1‑xxxx version available on Chocolatey
+          ##################################################################
+          $versions = choco list openssl.light --exact --all-versions | `
+                      Select-String -Pattern '1\.1\.1\.[0-9]+' | `
+                      ForEach-Object { $_.Matches.Value } | `
+                      Sort-Object -Descending
+
+          $installed = $false
+          foreach ($v in $versions) {
+            Write-Host "➜  Trying Chocolatey openssl.light $v ..."
+            choco install openssl.light --version $v --params "\"/InstallDir:C:\openssl\"" --no-progress -y
+            if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+          }
+
+          ##################################################################
+          # (B) Fallback: download official Win64OpenSSL_Light‑1.1.1w.exe
+          ##################################################################
+          if (-not $installed) {
+            Write-Host '⚠️  Chocolatey failed; downloading Win64OpenSSL_Light-1_1_1w.exe ...'
+            Invoke-WebRequest -Uri 'https://slproweb.com/download/Win64OpenSSL_Light-1_1_1w.exe' -OutFile openssl.exe
+            7z x -y openssl.exe -oopenssl_tmp | Out-Null
+            New-Item -ItemType Directory -Path C:\openssl\bin -Force | Out-Null
+            Copy-Item (Get-ChildItem -Path openssl_tmp -Recurse -Filter 'libcrypto*-x64.dll').FullName -Destination C:\openssl\bin -Force
+            Copy-Item (Get-ChildItem -Path openssl_tmp -Recurse -Filter 'libssl*-x64.dll').FullName    -Destination C:\openssl\bin -Force
+          }
 
       #######################################################################
       # 5️⃣  Configure CMake (Release + Skia + Lua scripting)
@@ -81,16 +105,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $outDir  = "${{ github.workspace }}\build\bin"
 
-          # Possible OpenSSL install roots we try
           $roots = @('C:\openssl\bin', 'C:\Program Files\OpenSSL-Win64\bin', 'C:\Program Files\OpenSSL-Win32\bin')
-
           $found = $false
           foreach ($r in $roots) {
             if (Test-Path $r) {
               $crypto = Get-ChildItem -Path $r -Filter 'libcrypto*-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
               $ssl    = Get-ChildItem -Path $r -Filter 'libssl*-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1
               if ($crypto -and $ssl) {
-                Write-Host "Found OpenSSL DLLs in $r -> copying to $outDir"
+                Write-Host "✅  Found OpenSSL DLLs in $r → copying to $outDir"
                 Copy-Item $crypto.FullName -Destination $outDir -Force
                 Copy-Item $ssl.FullName    -Destination $outDir -Force
                 $found = $true
@@ -99,9 +121,7 @@ jobs:
             }
           }
 
-          if (-not $found) {
-            Write-Error "❌ OpenSSL DLLs not found – verify installation step or paths."
-          }
+          if (-not $found) { throw '❌ OpenSSL DLLs not found – aborting.' }
 
       #######################################################################
       # 8️⃣  Upload artifact (exe + DLLs + data folder)
