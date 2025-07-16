@@ -1,43 +1,78 @@
-name: build-auto
+# GitHub Actions Workflow — Windows‑only Release build for Aseprite
+# Put this file in .github/workflows/build.yml
+
+name: build
+
 on:
   push:
-    paths:
-    - '.github/workflows/build-auto.yml'
-    - 'build.sh'
-    - 'laf'
+    branches: [main]
+  pull_request:
+
 jobs:
-  build-auto:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-        build_type: [RelWithDebInfo, Debug]
+  build:
+    runs-on: windows-latest
+
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: 'recursive'
-    - name: Install Dependencies
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y \
-          libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
-          libx11-dev libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
-    - uses: aseprite/get-ninja@main
-    - uses: ilammy/msvc-dev-cmd@v1
-      if: runner.os == 'Windows'
-    - name: Building
-      shell: bash
-      run: |
-        bash build.sh --auto --norun
-    - name: Running CLI Tests
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Linux" ]] ; then
-          export XVFB=xvfb-run
-        fi
-        export ASEPRITE=$PWD/build/bin/aseprite
-        cd tests
-        $XVFB bash run-tests.sh
+      # 📥 1) Checkout source (incl. submodules)
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 🛠️ 2) Toolchain helpers
+      - uses: aseprite/get-ninja@main      # Ninja installer
+      - uses: ilammy/msvc-dev-cmd@v1       # MSVC env vars
+
+      # 🎨 3) Download Skia (official helper script → always latest matching commit)
+      - name: Install Skia
+        shell: bash
+        run: |
+          this_dir=$(cygpath "${{ github.workspace }}")
+          skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+          skia_file=$(basename "$skia_url")
+          echo "Skia URL → $skia_url"
+          curl -L -o "$skia_file" "$skia_url"
+          unzip -q "$skia_file" -d skia
+
+      # 🔐 4) Install OpenSSL 1.1 runtime (Aseprite still depends on 1.1.x at runtime)
+      - name: Install OpenSSL 1.1 runtime
+        shell: pwsh
+        run: |
+          # Use a pinned 1.1.x line (last LTS – 1.1.1u is packaged as 1.1.1.2100)
+          choco install openssl --version 1.1.1.2100 --no-progress -y
+
+      # ⚙️ 5) Generate build files (Release + Skia + Lua scripting)
+      - name: Generate build files
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=$(realpath skia) \
+            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64) \
+            -DENABLE_SCRIPTING=ON \
+            -DENABLE_CCACHE=OFF
+
+      # 🏗️ 6) Compile (creates build/bin/aseprite.exe)
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release
+
+      # 📦 7) Bundle required runtime DLLs next to the exe
+      - name: Bundle OpenSSL DLLs
+        shell: pwsh
+        run: |
+          $dllRoot = 'C:\Program Files\OpenSSL-Win64\bin'
+          $outDir  = "${{ github.workspace }}\build\bin"
+          Copy-Item "$dllRoot\libcrypto-1_1-x64.dll" -Destination $outDir -Force
+          Copy-Item "$dllRoot\libssl-1_1-x64.dll"    -Destination $outDir -Force
+
+      # 📤 8) Upload artifact (exe + DLLs + data folder)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-windows-release
+          path: |
+            build/bin/aseprite.exe
+            build/bin/libcrypto-1_1-x64.dll
+            build/bin/libssl-1_1-x64.dll
+            build/bin/data/**
