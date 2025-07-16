@@ -1,5 +1,5 @@
 # GitHub Actions Workflow — Windows‑only **Release** build for Aseprite (GUI + Lua)
-# Copy this to .github/workflows/build.yml
+# Save as .github/workflows/build.yml
 
 name: build
 
@@ -13,16 +13,22 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # 1️⃣ Checkout (with submodules)
+      #######################################################################
+      # 1️⃣  Checkout (with submodules)
+      #######################################################################
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2️⃣ Toolchain helpers
-      - uses: aseprite/get-ninja@main      # Ninja
-      - uses: ilammy/msvc-dev-cmd@v1       # MSVC env
+      #######################################################################
+      # 2️⃣  Toolchain helpers – Ninja + MSVC env
+      #######################################################################
+      - uses: aseprite/get-ninja@main
+      - uses: ilammy/msvc-dev-cmd@v1
 
-      # 3️⃣ Download the Skia binary that matches the current commit
+      #######################################################################
+      # 3️⃣  Download Skia that matches the current Aseprite commit
+      #######################################################################
       - name: Download Skia
         shell: bash
         run: |
@@ -33,14 +39,21 @@ jobs:
           curl -L -o "$skia_file" "$skia_url"
           unzip -q "$skia_file" -d skia
 
-      # 4️⃣ Install OpenSSL 1.1 runtime to a **fixed path** so we can always find the DLLs
-      #    The *light* package has no weird extras and still ships 1.1.1‑series DLLs that Aseprite expects
-      - name: Install OpenSSL 1.1 runtime
+      #######################################################################
+      # 4️⃣  Install **OpenSSL 1.1** runtime (DLLs) in a predictable path
+      #     ▸ Chocolatey still hosts 1.1.1‑u (build 1.1.1.2100). If this build
+      #       ever disappears, bump the version to the latest available
+      #       **1.1.1‑YYYY** you can find on the package page.
+      #######################################################################
+      - name: Install OpenSSL 1.1 runtime
         shell: pwsh
         run: |
-          choco install openssl.light --version 1.1.1.2100 --params "/InstallDir:C:\openssl" --no-progress -y
+          $ErrorActionPreference = 'Stop'
+          choco install openssl.light --version 1.1.1.2100 --params "\"/InstallDir:C:\openssl\"" --no-progress -y
 
-      # 5️⃣ Configure CMake (Release + Skia + Lua scripting)
+      #######################################################################
+      # 5️⃣  Configure CMake (Release + Skia + Lua scripting)
+      #######################################################################
       - name: Configure CMake
         shell: bash
         run: |
@@ -52,27 +65,53 @@ jobs:
             -DENABLE_SCRIPTING=ON \
             -DENABLE_CCACHE=OFF
 
-      # 6️⃣ Build
+      #######################################################################
+      # 6️⃣  Build
+      #######################################################################
       - name: Build
         shell: bash
         run: cmake --build build --config Release
 
-      # 7️⃣ Bundle the two OpenSSL 1.1 DLLs next to the exe
+      #######################################################################
+      # 7️⃣  Bundle OpenSSL DLLs next to the exe (robust search)
+      #######################################################################
       - name: Bundle OpenSSL DLLs
         shell: pwsh
         run: |
-          $dllRoot = 'C:\openssl\bin'
+          $ErrorActionPreference = 'Stop'
           $outDir  = "${{ github.workspace }}\build\bin"
-          Copy-Item "$dllRoot\libcrypto-1_1-x64.dll" -Destination $outDir -Force
-          Copy-Item "$dllRoot\libssl-1_1-x64.dll"    -Destination $outDir -Force
 
-      # 8️⃣ Upload artifact (exe + DLLs + data folder)
+          # Possible OpenSSL install roots we try
+          $roots = @('C:\openssl\bin', 'C:\Program Files\OpenSSL-Win64\bin', 'C:\Program Files\OpenSSL-Win32\bin')
+
+          $found = $false
+          foreach ($r in $roots) {
+            if (Test-Path $r) {
+              $crypto = Get-ChildItem -Path $r -Filter 'libcrypto*-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+              $ssl    = Get-ChildItem -Path $r -Filter 'libssl*-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($crypto -and $ssl) {
+                Write-Host "Found OpenSSL DLLs in $r -> copying to $outDir"
+                Copy-Item $crypto.FullName -Destination $outDir -Force
+                Copy-Item $ssl.FullName    -Destination $outDir -Force
+                $found = $true
+                break
+              }
+            }
+          }
+
+          if (-not $found) {
+            Write-Error "❌ OpenSSL DLLs not found – verify installation step or paths."
+          }
+
+      #######################################################################
+      # 8️⃣  Upload artifact (exe + DLLs + data folder)
+      #######################################################################
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-windows-release
           path: |
             build/bin/aseprite.exe
-            build/bin/libcrypto-1_1-x64.dll
-            build/bin/libssl-1_1-x64.dll
+            build/bin/libcrypto*-x64.dll
+            build/bin/libssl*-x64.dll
             build/bin/data/**
