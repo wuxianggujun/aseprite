@@ -1,92 +1,75 @@
+# GitHub Actions Workflow – Windows‑only Release build
+# Save as .github/workflows/build.yml (or replace your existing one)
+
 name: build
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    # 👉 只在最新版 Windows runner 上执行
+    runs-on: windows-latest
+
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest]
-        build_type: [Release]
-        ui: [gui, cli]
-        scripting: [lua, noscripts]
-        exclude:
-          - build_type: Release
-            ui: gui
-          - build_type: Release
-            ui: cli
-          - build_type: Release
-            scripting: noscripts
+        build_type: [Release]   # 只编 Release
+        ui: [gui]              # 如需 CLI 请改为 [gui, cli]
+        scripting: [lua]       # 按需改为 [lua, noscripts]
+
     steps:
+    # 1️⃣ 拉源码（含子模块）
     - uses: actions/checkout@v4
       with:
-        submodules: 'recursive'
-    - name: Install Dependencies
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y \
-          libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
-          libx11-dev libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
+        submodules: recursive
+
+    # 2️⃣ Ninja 构建工具
+    - uses: aseprite/get-ninja@main
+
+    # 3️⃣ MSVC 环境初始化
+    - uses: ilammy/msvc-dev-cmd@v1
+
+    # 4️⃣ 下载 / 解压 Skia（二进制包由 aseprite 项目脚本提供）
     - name: Install Skia
       if: ${{ matrix.ui == 'gui' }}
       shell: bash
       run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          this_dir=$(cygpath "${{ github.workspace }}")
-        else
-          this_dir="${{ github.workspace }}"
-        fi
-        skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
-        skia_file=$(basename $skia_url)
+        this_dir=$(cygpath "${{ github.workspace }}")
+        skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+        skia_file=$(basename "$skia_url")
         curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
         unzip "$skia_file" -d skia
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2.17
-      if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
-      with:
-        key: ${{ matrix.os }}-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
-    - uses: aseprite/get-ninja@main
-    - uses: ilammy/msvc-dev-cmd@v1
-      if: runner.os == 'Windows'
-    - name: Generating Makefiles
+
+    # 5️⃣ 生成构建文件
+    - name: Generate Build Files
       shell: bash
       run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          export enable_ccache=off
-        else
-          export enable_ccache=on
-        fi
-
-        if [[ "${{ matrix.ui }}" == "gui" ]] ; then
-          export laf_backend=skia
-        else
-          export laf_backend=none
-        fi
-
-        if [[ "${{ matrix.scripting }}" == "lua" ]] ; then
-          export enable_scripting=on
-        else
-          export enable_scripting=off
-        fi
-
-        if [[ "${{ runner.os }}" == "macOS" ]] ; then
-          export skia_arch=arm64
-        else
-          export skia_arch=x64
-        fi
+        export enable_ccache=off            # Windows 没有 ccache
+        export laf_backend=skia             # 只做 GUI 构建
+        export enable_scripting=on          # 启用 Lua
+        export skia_arch=x64
 
         cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
           -DENABLE_TESTS=ON \
           -DENABLE_SCRIPTING=$enable_scripting \
           -DENABLE_CCACHE=$enable_ccache \
           -DLAF_BACKEND=$laf_backend \
           -DSKIA_DIR=$(realpath skia) \
           -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
-    - name: Compiling
+
+    # 6️⃣ 编译
+    - name: Build
       shell: bash
       run: |
         cd build && ninja
+
+    # 7️⃣ 上传可执行文件作为构件
+    - name: Upload exe artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
+        path: build/bin/*.exe
